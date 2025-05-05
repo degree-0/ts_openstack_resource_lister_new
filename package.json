@@ -1,0 +1,26 @@
+{
+  "name": "ts_openstack_resource_lister",
+  "version": "1.0.0",
+  "description": "A tool to list resources from OpenStack",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsup src/main.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "export-to-csv": "^1.4.0",
+    "ky": "^1.8.1",
+    "tsup": "^8.4.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/openstack-wrapper": "^2.1.6"
+  }
+}
