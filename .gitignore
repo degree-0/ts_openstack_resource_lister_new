@@ -1,4 +1,5 @@
 .env
 node_modules
 dist
-output/openstack-servers.csv
+output/*
+
