@@ -4,7 +4,7 @@ import { writeFile } from "node:fs";
 import { Buffer } from "node:buffer";
 
 import dotenv from 'dotenv';
-import { Server } from './types';
+import { Server } from '../src/utils/types';
 dotenv.config();
 
 // Parse the base64 into JSON data

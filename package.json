@@ -4,7 +4,7 @@
   "description": "A tool to list resources from OpenStack",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
     "build": "tsup src/main.ts"
   },
@@ -14,14 +14,13 @@
   "dependencies": {
     "dotenv": "^16.5.0",
     "exceljs": "^4.4.0",
-    "export-to-csv": "^1.4.0",
     "ky": "^1.8.1",
-    "tsup": "^8.4.0",
-    "tsx": "^4.19.4",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   },
   "devDependencies": {
-    "@types/node": "^22.15.3",
+    "@types/node": "^24.0.4",
     "@types/openstack-wrapper": "^2.1.6"
   },
   "packageManager": "pnpm@9.10.0+sha512.73a29afa36a0d092ece5271de5177ecbf8318d454ecd701343131b8ebc0c1a91c487da46ab77c8e596d6acf1461e3594ced4becedf8921b074fbd8653ed7051c"

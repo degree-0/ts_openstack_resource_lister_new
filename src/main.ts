@@ -1,9 +1,15 @@
-import { mkConfig, generateCsv, asString } from "export-to-csv";
-import ky from 'ky';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-import ExcelJS from 'exceljs';
+import * as ExcelJS from 'exceljs';
+import { flattenServer, flattenVolume, getProjectToken, getProjects, getServers, getFlavors, getVolumes } from './utils/stc-api';
+import {
+    ProjectsResponse,
+    Server,
+    Volume,
+    Endpoint,
+} from './utils/types.js';
+import { createTable } from './utils/excel-helpers';
 
 
 dotenv.config();
@@ -14,248 +20,231 @@ const endpoints: Endpoint[] = JSON.parse(decoded_endpoints);
 const username: string = process.env.OS_USERNAME || '';
 const password: string = process.env.OS_PASSWORD || '';
 
-type Endpoint = {
-    domain: string;
-    endpoint: string;
-    initial_project: string;
-}
 
 
 
+const main = async () => {
+    console.log('[main.ts] Starting OpenStack resource collection...');
 
-// Promisified version of getProjectToken
-const getProjectToken = async (endpoint: string, domain: string, username: string, password: string, projectId: string) => {
-    console.log(`getting project token for projectId ${projectId}`);
-    const keystone_url: any = `${endpoint}/identity/v3/auth/tokens`;
+    const allFlattenedServers: Record<string, any>[] = [];
+    const allFlattenedVolumes: Record<string, any>[] = [];
+    //const allFlattenedFlavors: Record<string, any>[] = [];
 
-    const payload = {
-        "auth": {
-            "identity": {
-                "methods": ["password"],
-                "password": {
-                    "user": {
-                        "domain": {
-                            "name": domain
-                        },
-                        "name": username,
-                        "password": password
-                    }
-                }
-            },
-            "scope": {
-                "project": {
-                    "domain": {
-                        "name": domain
-                    },
-                    "name": projectId
-                }
-            }
-        }
-    }
-    try {
-        const response = await ky.post(keystone_url, { json: payload });
-        return response.headers.get('x-subject-token');
-    } catch (error) {
-        console.error(error);
-    }
+    // STEP 1: Collect ALL raw servers and volumes from ALL projects and endpoints first
+    const allRawServers: Record<string, any>[] = [];
+    const allRawVolumes: Record<string, any>[] = [];
 
+    console.log(`[main.ts] Processing ${endpoints.length} endpoint(s)`);
 
-}
-
-const getProjects = async (endpoint: string, token: string) => {
-    const projects_url: any = `${endpoint}/identity/v3/auth/projects`;
-    const json = await ky.get(projects_url, { headers: { 'X-Auth-Token': token } }).json();
-    return json;
-}
-
-const getServers = async (endpoint: string, token: string) => {
-    try {
-        const servers_url: any = `${endpoint}/compute/v2.1/servers/detail`;
-        const json = await ky.get(servers_url, { headers: { 'X-Auth-Token': token } }).json();
-        return json;
-    } catch (error) {
-        console.error(error);
-    }
-}
-
-const getFlavors = async (endpoint: string, token: string) => {
-    const flavors_url: any = `${endpoint}/compute/v2.1/flavors/detail`;
-    const json = await ky.get(flavors_url, { headers: { 'X-Auth-Token': token } }).json();
-    return json;
-}
-
-const getVolumes = async (endpoint: string, token: string) => {
-    try {
-        const volumes_url: any = `${endpoint}/compute/v2.1/os-volumes/detail`;
-        console.log(`Fetching volumes from: ${volumes_url}`);
-        const response = await ky.get(volumes_url, { 
-            headers: { 'X-Auth-Token': token },
-            throwHttpErrors: false // Don't throw on HTTP errors
-        });
-        
-        if (!response.ok) {
-            console.error(`Failed to fetch volumes. Status: ${response.status}`);
-            console.error(`Response: ${await response.text()}`);
-            return { volumes: [] };
-        }
-
-        const json = await response.json();
-        //console.log('Volumes response:', JSON.stringify(json, null, 2));
-        return json;
-    } catch (error) {
-        console.error('Error fetching volumes:', error);
-        return { volumes: [] };
-    }
-}
-
-const flattenServer = (server: any, flavors: any[], domain: string, projectName: string): Record<string, string> => {
-    const flattened: Record<string, string> = {};
-    
-    // Add domain and project info
-    flattened['domain'] = domain;
-    flattened['project_name'] = projectName;
-    
-    // Find matching flavor
-    const flavor = flavors.find(f => f.id === server.flavor.id);
-    
-    // List of columns to exclude
-    const excludedColumns = [
-        'OS-EXT-STS:task_state',
-        'addresses',
-        'links',
-        'flavor_id',
-        'progress',
-        'accessIPv4',
-        'accessIPv6',
-        'config_drive',
-        'hostId',
-        'OS-SRV-USG:terminated_at',
-        'key_name',
-        'tenant_id',
-        'os-extended-volumes:volumes_attached',
-        'metadata'
-    ];
-    
-    for (const [key, value] of Object.entries(server)) {
-        // Skip excluded columns
-        if (excludedColumns.includes(key)) {
-            continue;
-        }
-        
-        if (value === null) {
-            flattened[key] = '';
-        } else if (typeof value === 'object') {
-            if (Array.isArray(value)) {
-                // Handle arrays (like security_groups)
-                if (key === 'security_groups') {
-                    flattened[key] = value.map((sg: any) => sg.name).join(';');
-                } else {
-                    flattened[key] = value.map((item: any) => JSON.stringify(item)).join(';');
-                }
-            } else {
-                // Handle objects (like flavor)
-                if (key === 'flavor') {
-                    if (flavor) {
-                        flattened[`${key}_name`] = flavor.name;
-                        flattened[`${key}_ram`] = flavor.ram.toString();
-                        flattened[`${key}_vcpus`] = flavor.vcpus.toString();
-                        flattened[`${key}_disk`] = flavor.disk.toString();
-                    }
-                } else {
-                    flattened[key] = JSON.stringify(value);
-                }
-            }
-        } else {
-            flattened[key] = String(value);
-        }
-    }
-    
-    return flattened;
-};
-
-const flattenVolume = (volume: any, domain: string, projectName: string): Record<string, string> => {
-    const flattened: Record<string, string> = {};
-    
-    // Add domain and project info
-    flattened['domain'] = domain;
-    flattened['project_name'] = projectName;
-    
-    // List of columns to exclude
-    const excludedColumns = [
-        'links',
-        'volume_image_metadata'
-    ];
-    
-    for (const [key, value] of Object.entries(volume)) {
-        // Skip excluded columns
-        if (excludedColumns.includes(key)) {
-            continue;
-        }
-        
-        if (value === null) {
-            flattened[key] = '';
-        } else if (typeof value === 'object') {
-            if (Array.isArray(value)) {
-                flattened[key] = value.map((item: any) => JSON.stringify(item)).join(';');
-            } else {
-                flattened[key] = JSON.stringify(value);
-            }
-        } else {
-            flattened[key] = String(value);
-        }
-    }
-    
-    return flattened;
-};
-
-(async () => {
-    const allFlattenedServers: Record<string, string>[] = [];
-    const allFlattenedVolumes: Record<string, string>[] = [];
-    
     for (const endpoint of endpoints) {
+        console.log(`[${endpoint.domain}] Processing endpoint: ${endpoint.endpoint}`);
         const generalProjectToken = await getProjectToken(endpoint.endpoint, endpoint.domain, username, password, endpoint.initial_project);
         if (!generalProjectToken) {
-            throw new Error('Failed to get project token');
+            throw new Error(`[${endpoint.domain}] Failed to get project token`);
         }
-        const projects: any = await getProjects(endpoint.endpoint, generalProjectToken);
-        if (!projects) {
-            throw new Error('Failed to get projects');
-        }
-        
-        for (const project of projects.projects) {
-            const projectToken = await getProjectToken(endpoint.endpoint, endpoint.domain, username, password, project.name);
-            if (!projectToken) {
-                throw new Error('Failed to get project token');
-            }
-            
-            // Get flavors first
-            const flavors: any = await getFlavors(endpoint.endpoint, projectToken);
-            
-            // List servers
-            const servers: any = await getServers(endpoint.endpoint, projectToken);
-            if (servers.servers.length > 0) {
-                const flattenedServers = servers.servers.map((server: any) => 
-                    flattenServer(server, flavors.flavors, endpoint.domain, project.name)
-                );
-                allFlattenedServers.push(...flattenedServers);
-            }
 
-            // List volumes
-            const volumes: any = await getVolumes(endpoint.endpoint, projectToken);
-            //console.log('Volumes data:', volumes);
-            if (volumes?.volumes?.length > 0) {
-                
-                const flattenedVolumes = volumes.volumes.map((volume: any) => 
-                    flattenVolume(volume, endpoint.domain, project.name)
-                );
-                allFlattenedVolumes.push(...flattenedVolumes);
-            } else {
-                console.log(`No volumes found for project ${project.name}`);
-            }
+        const projects: ProjectsResponse = await getProjects(endpoint.endpoint, generalProjectToken);
+        console.log(`[${endpoint.domain}] Found ${projects.projects.length} projects`);
+
+
+        if (!projects) {
+            throw new Error(`[${endpoint.domain}] Failed to get projects`);
         }
+
+        console.log(`[${endpoint.domain}] 🚀 Processing ${projects.projects.length} project(s) in parallel...`);
+
+        // Process all projects in parallel using Promise.all
+        const projectResults = await Promise.all(
+            projects.projects.map(async (project) => {
+                const projectPrefix = `[${endpoint.domain}] [${project.name}]`;
+                console.log(`${projectPrefix} Processing project...`);
+
+                try {
+                    const projectToken = await getProjectToken(endpoint.endpoint, endpoint.domain, username, password, project.name);
+                    if (!projectToken) {
+                        console.error(`${projectPrefix} Failed to get project token`);
+                        return { servers: [], volumes: [] };
+}
+
+                    // Parallelize flavors, servers, and volumes API calls for better performance
+                    console.log(`${projectPrefix} 🚀 Making parallel API calls for flavors, servers, and volumes...`);
+                    const [flavors, servers, volumes] = await Promise.all([
+                        getFlavors(endpoint.endpoint, projectToken),
+                        getServers(endpoint.endpoint, projectToken),
+                        getVolumes(endpoint.endpoint, projectToken)
+                    ]);
+
+                    console.log(`${projectPrefix} [flavors] Found ${flavors.flavors.length} flavors`);
+
+                    let rawFlattenedServers: Record<string, any>[] = [];
+                    if (servers && servers.servers.length > 0) {
+                        console.log(`${projectPrefix} [servers] Found ${servers.servers.length} servers`);
+
+                        // Process ALL servers (no sampling)
+                        rawFlattenedServers = servers.servers.map((server: Server, index: number) => {
+                            const flattened = flattenServer(server, flavors.flavors, endpoint.domain, project.name);
+                            return flattened;
+                        });
+
+                        console.log(`${projectPrefix} [servers] ✅ Added ${rawFlattenedServers.length} servers to global collection`);
+                    } else {
+                        console.log(`${projectPrefix} [servers] No servers found`);
+                    }
+
+                    let rawFlattenedVolumes: Record<string, any>[] = [];
+                    if (volumes?.volumes?.length > 0) {
+                        console.log(`${projectPrefix} [volumes] Found ${volumes.volumes.length} volumes`);
+                        
+                        // Process ALL volumes (no sampling)
+                        rawFlattenedVolumes = volumes.volumes.map((volume: Volume, index: number) => {
+                            const flattened = flattenVolume(volume, endpoint.domain, project.name);
+                            return flattened;
+                        });
+                        
+                        console.log(`${projectPrefix} [volumes] ✅ Added ${rawFlattenedVolumes.length} volumes to global collection`);
+                    } else {
+                        console.log(`${projectPrefix} [volumes] No volumes found`);
+                    }
+
+                    return {
+                        servers: rawFlattenedServers,
+                        volumes: rawFlattenedVolumes
+                    };
+
+    } catch (error) {
+                    console.error(`${projectPrefix} ❌ Error processing project:`, error);
+                    return { servers: [], volumes: [] };
+    }
+            })
+        );
+
+        // Aggregate results from all projects in this endpoint
+        const endpointServers = projectResults.flatMap(result => result.servers);
+        const endpointVolumes = projectResults.flatMap(result => result.volumes);
+
+        console.log(`[${endpoint.domain}] ✅ Completed processing ${projects.projects.length} projects: ${endpointServers.length} servers, ${endpointVolumes.length} volumes`);
+
+        // Add to global collections
+        allRawServers.push(...endpointServers);
+        allRawVolumes.push(...endpointVolumes);
+    }
+
+    // STEP 2: Global normalization across ALL servers from ALL projects
+    if (allRawServers.length > 0) {
+        console.log(`[main.ts] 🌍 GLOBAL NORMALIZATION: Processing ${allRawServers.length} servers from all projects`);
+    
+        // Collect ALL possible properties from ALL servers across ALL projects
+        const allPossibleProps = new Set<string>();
+        allRawServers.forEach((server, index) => {
+            Object.keys(server).forEach(prop => allPossibleProps.add(prop));
+        });
+
+        const sortedAllProps = Array.from(allPossibleProps).sort();
+        console.log(`[main.ts] 🔧 Found ${sortedAllProps.length} unique properties across ALL projects`);
+
+        // Normalize ALL servers to have the same properties
+        console.log(`[main.ts] 🔄 Normalizing ${allRawServers.length} servers...`);
+        const normalizedAllServers = allRawServers.map((server, index) => {
+            const normalizedServer: Record<string, any> = {};
+            sortedAllProps.forEach(prop => {
+                // Preserve numeric values when available, otherwise use appropriate defaults
+                if (server[prop] !== undefined) {
+                    normalizedServer[prop] = server[prop];
+                } else {
+                    // Use appropriate defaults based on property name
+                    if (prop.includes('flavor_ram') || prop.includes('flavor_vcpus') ||
+                        prop.includes('flavor_disk') || prop === 'OS-EXT-STS:power_state') {
+                        normalizedServer[prop] = 0; // Numeric fields default to 0
+            } else {
+                        normalizedServer[prop] = ''; // String fields default to empty string
+                    }
+                }
+            });
+            if (index % 500 === 0 && index > 0) { // Less frequent logging for large datasets
+                console.log(`[main.ts] ✅ Normalized ${index + 1}/${allRawServers.length} servers`);
+            }
+            return normalizedServer;
+        });
+
+        // Verify ALL servers now have identical property counts
+        const expectedPropCount = sortedAllProps.length;
+        let allConsistent = true;
+        normalizedAllServers.forEach((server, index) => {
+            const currentProps = Object.keys(server).length;
+            if (currentProps !== expectedPropCount) {
+                console.log(`[main.ts] 🚨 GLOBAL INCONSISTENCY! Server ${index} has ${currentProps} props, expected ${expectedPropCount}`);
+                allConsistent = false;
+                    }
+        });
+
+        if (allConsistent) {
+            console.log(`[main.ts] ✅ GLOBAL NORMALIZATION SUCCESS: All ${normalizedAllServers.length} servers have exactly ${expectedPropCount} properties`);
+        } else {
+            console.log(`[main.ts] ❌ GLOBAL NORMALIZATION FAILED: Servers still have inconsistent property counts`);
+        }
+
+        allFlattenedServers.push(...normalizedAllServers);
+    }
+
+    // STEP 3: Global normalization across ALL volumes from ALL projects
+    if (allRawVolumes.length > 0) {
+        console.log(`[main.ts] 🌍 GLOBAL NORMALIZATION: Processing ${allRawVolumes.length} volumes from all projects`);
+
+        // Collect ALL possible properties from ALL volumes across ALL projects
+        const allPossibleVolumeProps = new Set<string>();
+        allRawVolumes.forEach((volume, index) => {
+            Object.keys(volume).forEach(prop => allPossibleVolumeProps.add(prop));
+        });
+
+        const sortedAllVolumeProps = Array.from(allPossibleVolumeProps).sort();
+        console.log(`[main.ts] 🔧 Found ${sortedAllVolumeProps.length} unique properties across ALL volume projects`);
+
+        // Normalize ALL volumes to have the same properties
+        console.log(`[main.ts] 🔄 Normalizing ${allRawVolumes.length} volumes...`);
+        const normalizedAllVolumes = allRawVolumes.map((volume, index) => {
+            const normalizedVolume: Record<string, any> = {};
+            sortedAllVolumeProps.forEach(prop => {
+                // Preserve values when available, otherwise use appropriate defaults
+                if (volume[prop] !== undefined) {
+                    normalizedVolume[prop] = volume[prop];
+            } else {
+                    // Use appropriate defaults based on property name
+                    if (prop === 'size' || prop.includes('_size') || prop.includes('_count')) {
+                        normalizedVolume[prop] = 0; // Numeric fields default to 0
+        } else {
+                        normalizedVolume[prop] = ''; // String fields default to empty string
+                    }
+                }
+            });
+            if (index % 500 === 0 && index > 0) {
+                console.log(`[main.ts] ✅ Normalized ${index + 1}/${allRawVolumes.length} volumes`);
+        }
+            return normalizedVolume;
+        });
+
+        // Verify ALL volumes now have identical property counts
+        const expectedVolumePropCount = sortedAllVolumeProps.length;
+        let allVolumeConsistent = true;
+        normalizedAllVolumes.forEach((volume, index) => {
+            const currentProps = Object.keys(volume).length;
+            if (currentProps !== expectedVolumePropCount) {
+                console.log(`[main.ts] 🚨 GLOBAL VOLUME INCONSISTENCY! Volume ${index} has ${currentProps} props, expected ${expectedVolumePropCount}`);
+                allVolumeConsistent = false;
+            }
+        });
+
+        if (allVolumeConsistent) {
+            console.log(`[main.ts] ✅ GLOBAL VOLUME NORMALIZATION SUCCESS: All ${normalizedAllVolumes.length} volumes have exactly ${expectedVolumePropCount} properties`);
+            } else {
+            console.log(`[main.ts] ❌ GLOBAL VOLUME NORMALIZATION FAILED: Volumes still have inconsistent property counts`);
+        }
+
+        allFlattenedVolumes.push(...normalizedAllVolumes);
     }
 
     if (allFlattenedServers.length > 0 || allFlattenedVolumes.length > 0) {
+        console.log(`[main.ts] 📊 Creating Excel report...`);
+
         // Create output directory if it doesn't exist
         const outputDir = path.join(process.cwd(), 'output');
         if (!fs.existsSync(outputDir)) {
@@ -267,32 +256,62 @@ const flattenVolume = (volume: any, domain: string, projectName: string): Record
         
         // Add servers worksheet
         if (allFlattenedServers.length > 0) {
+            console.log(`[main.ts] [excel] Creating servers worksheet with ${Object.keys(allFlattenedServers[0]).length} columns for ${allFlattenedServers.length} servers`);
+
             const serversSheet = workbook.addWorksheet('Servers');
             const headers = Object.keys(allFlattenedServers[0]);
-            serversSheet.addRow(headers);
-            allFlattenedServers.forEach(server => {
-                serversSheet.addRow(Object.values(server));
-            });
+
+            // Build table columns config
+            const tableColumns = headers.map(header => ({
+                name: header,
+                filterButton: true,
+            }));
 
             // Create named table for servers
-            console.log('creating table for servers');
             const serversTable = serversSheet.addTable({
                 name: 'servers_table',
-                ref: `A1`,
+                ref: 'A1',
                 headerRow: true,
-                columns: headers.map(header => ({ 
-                    name: header,
-                    filterButton: true,
-
-                    
-                })),
-                rows: allFlattenedServers.map(server => Object.values(server)),
                 style: {
-                    theme: 'TableStyleDark1',
+                    theme: 'TableStyleLight15',
                     showFirstColumn: true,
                     showLastColumn: true,
                     showRowStripes: true,
                     showColumnStripes: false
+                },
+                columns: tableColumns,
+                rows: []
+            });
+
+            // Add data rows to the table
+            console.log(`[main.ts] [excel] [servers] Adding ${allFlattenedServers.length} rows to table...`);
+            allFlattenedServers.forEach((server, index) => {
+                const values = Object.values(server);
+
+                if (values.length !== tableColumns.length) {
+                    console.log(`[main.ts] [excel] [servers] 🚨 COLUMN MISMATCH! Row ${index}: ${values.length} values vs ${tableColumns.length} columns`);
+                }
+
+                serversTable.addRow(values);
+
+                if (index % 1000 === 0 && index > 0) {
+                    console.log(`[main.ts] [excel] [servers] ✅ Added ${index + 1}/${allFlattenedServers.length} rows`);
+                }
+            });
+
+            console.log(`[main.ts] [excel] [servers] 🔄 Committing table...`);
+            serversTable.commit();
+            console.log(`[main.ts] [excel] [servers] ✅ Table created successfully!`);
+
+            // Now style the header row after table is committed
+            const headerRow = serversSheet.getRow(1);
+            headerRow.font = { bold: true };
+            headerRow.alignment = { horizontal: 'center' };
+
+            // Auto-fit columns
+            serversSheet.columns.forEach(column => {
+                if (column.header) {
+                    column.width = Math.max(column.header.toString().length + 2, 15);
                 }
             });
 
@@ -303,83 +322,257 @@ const flattenVolume = (volume: any, domain: string, projectName: string): Record
             const uniqueProjects = [...new Set(allFlattenedServers.map(s => s.project_name))];
             const uniqueStatuses = [...new Set(allFlattenedServers.map(s => s.status))];
             
-            // Create status summary table
-            serversSummarySheet.addRow(['Project Name', ...uniqueStatuses]);
+            console.log(`[main.ts] [excel] [servers_summary] Found ${uniqueProjects.length} projects and ${uniqueStatuses.length} statuses: ${uniqueStatuses.join(', ')}`);
+
+            // Create status summary table data
+            const statusSummaryData: any[][] = [];
             uniqueProjects.forEach((project, index) => {
-                const row = [project];
-                uniqueStatuses.forEach(status => {
-                    row.push(`=COUNTIFS(servers_table[project_name],$A${index + 2},servers_table[status],B$1)`);
+                const rowData: any[] = [project];
+                uniqueStatuses.forEach((status, statusIndex) => {
+                    // Add simple COUNTIFS formula using table name references
+                    rowData.push({
+                        formula: `COUNTIFS(servers_table[project_name],"${project}",servers_table[status],"${status}")`
+                    });
                 });
-                serversSummarySheet.addRow(row);
+                statusSummaryData.push(rowData);
             });
 
-            // Add compute power summary
-            serversSummarySheet.addRow([]); // Empty row for spacing
-            serversSummarySheet.addRow(['Project Name', 'Total vCPUs', 'Total RAM (MB)']);
-            uniqueProjects.forEach((project, index) => {
-                serversSummarySheet.addRow([
+            // Create status summary table
+            const statusTableColumns = [
+                { name: 'Project Name', filterButton: true },
+                ...uniqueStatuses.map(status => ({ name: status, filterButton: true }))
+            ];
+
+            createTable({
+                worksheet: serversSummarySheet,
+                name: 'servers_status_summary',
+                ref: 'A1',
+                columns: statusTableColumns,
+                rows: statusSummaryData,
+                totalsRow: true,
+            });
+
+            console.log(`[main.ts] [excel] [servers_summary] ✅ Status summary table created!`);
+
+            // Add compute power summary table (starting after status table + some spacing)
+            const computeStartRow = uniqueProjects.length + 5; // Status table + header + totals + spacing
+
+            const computeSummaryData: any[][] = [];
+            uniqueProjects.forEach((project) => {
+                computeSummaryData.push([
                     project,
-                    `=SUMIFS(servers_table[flavor_vcpus],servers_table[project_name],$A${index + uniqueStatuses.length + 4})`,
-                    `=SUMIFS(servers_table[flavor_ram],servers_table[project_name],$A${index + uniqueStatuses.length + 4})`
+                    { formula: `SUMIF(servers_table[project_name],"${project}",servers_table[flavor_vcpus])` },
+                    { formula: `SUMIF(servers_table[project_name],"${project}",servers_table[flavor_ram])` }
                 ]);
             });
+
+            const computeTableColumns = [
+                { name: 'Project Name', filterButton: true },
+                { name: 'Total vCPUs', filterButton: true },
+                { name: 'Total RAM (MB)', filterButton: true }
+            ];
+
+            createTable({
+                worksheet: serversSummarySheet,
+                name: 'servers_compute_summary',
+                ref: `A${computeStartRow}`,
+                columns: computeTableColumns,
+                rows: computeSummaryData,
+                totalsRow: true,
+            });
+
+            console.log(`[main.ts] [excel] [servers_summary] ✅ Compute summary table created!`);
         }
         
         // Add volumes worksheet
         if (allFlattenedVolumes.length > 0) {
+            console.log(`[main.ts] [excel] Creating volumes worksheet with ${Object.keys(allFlattenedVolumes[0]).length} columns for ${allFlattenedVolumes.length} volumes`);
+
             const volumesSheet = workbook.addWorksheet('Volumes');
             const headers = Object.keys(allFlattenedVolumes[0]);
-            volumesSheet.addRow(headers);
-            allFlattenedVolumes.forEach(volume => {
-                volumesSheet.addRow(Object.values(volume));
-            });
+
+            // Build table columns config
+            const tableColumns = headers.map(header => ({
+                name: header,
+                filterButton: true,
+            }));
 
             // Create named table for volumes
-            console.log('creating table for volumes');
-            const volumesTable = volumesSheet.addTable({
+            const volumesTable = createTable({
+                worksheet: volumesSheet,
                 name: 'volumes_table',
-                ref: `A1`,
-                columns: headers.map(header => ({ 
-                    name: header,
-                    filterButton: true,
-                    
-                })),
-                rows: allFlattenedVolumes.map(volume => Object.values(volume)),
-                style: {
-                    theme: 'TableStyleDark1',
-                    showFirstColumn: true,
-                    showLastColumn: true,
-                    showRowStripes: true,
-                    showColumnStripes: false
+                ref: 'A1',
+                columns: tableColumns,
+                rows: [], // No data rows yet
+            });
+
+            // Add data rows to the table
+            console.log(`[main.ts] [excel] [volumes] Adding ${allFlattenedVolumes.length} rows to table...`);
+            allFlattenedVolumes.forEach((volume, index) => {
+                const values = Object.values(volume);
+                volumesTable.addRow(values);
+
+                if (index % 1000 === 0 && index > 0) {
+                    console.log(`[main.ts] [excel] [volumes] ✅ Added ${index + 1}/${allFlattenedVolumes.length} rows`);
+                }
+            });
+
+            // Commit the table changes
+            console.log(`[main.ts] [excel] [volumes] 🔄 Committing table...`);
+            volumesTable.commit();
+            console.log(`[main.ts] [excel] [volumes] ✅ Table created successfully!`);
+
+            // Now style the header row after table is committed
+            const headerRow = volumesSheet.getRow(1);
+            headerRow.font = { bold: true };
+            headerRow.alignment = { horizontal: 'center' };
+
+            // Auto-fit columns
+            volumesSheet.columns.forEach(column => {
+                if (column.header) {
+                    column.width = Math.max(column.header.toString().length + 2, 15);
                 }
             });
 
             // Add volumes summary sheet
             const volumesSummarySheet = workbook.addWorksheet('Volumes Summary');
             
-            // Get unique volume types and statuses
-            const uniqueVolumeTypes = [...new Set(allFlattenedVolumes.map(v => v.volume_type))];
-            const uniqueStatuses = [...new Set(allFlattenedVolumes.map(v => v.status))];
+            // Get unique projects, volume types, and volume statuses
+            const uniqueVolumeProjects = [...new Set(allFlattenedVolumes.map(v => v.project_name))];
+            const uniqueVolumeTypes = [...new Set(allFlattenedVolumes.map(v => v.volumeType))].filter(type => type && type !== '');
+            const uniqueVolumeStatuses = [...new Set(allFlattenedVolumes.map(v => v.status))].filter(status => status && status !== '');
             
-            // Create volume type summary table
-            volumesSummarySheet.addRow(['Volume Type', ...uniqueStatuses]);
-            uniqueVolumeTypes.forEach((type, index) => {
-                const row = [type];
-                uniqueStatuses.forEach(status => {
-                    row.push(`=SUMIFS(volumes_table[size],volumes_table[volume_type],$A${index + 2},volumes_table[status],B$1)`);
+            console.log(`[main.ts] [excel] [volumes_summary] Found ${uniqueVolumeProjects.length} projects, ${uniqueVolumeTypes.length} volume types: ${uniqueVolumeTypes.join(', ')}`);
+            console.log(`[main.ts] [excel] [volumes_summary] Found ${uniqueVolumeStatuses.length} volume statuses: ${uniqueVolumeStatuses.join(', ')}`);
+
+        
+            // Create volume TYPE summary table data  
+            const volumeTypeSummaryData: any[][] = [];
+            uniqueVolumeProjects.forEach((project) => {
+                const rowData: any[] = [project];
+                uniqueVolumeTypes.forEach((volumeType) => {
+                    // Add formula to count volumes for each volume type
+                    rowData.push({
+                        formula: `COUNTIFS(volumes_table[project_name],"${project}",volumes_table[volumeType],"${volumeType}")`
+                    });
                 });
-                volumesSummarySheet.addRow(row);
+                volumeTypeSummaryData.push(rowData);
             });
+
+            // Create volume TYPE summary table
+            const volumeTypeTableColumns = [
+                { name: 'Project Name', filterButton: true },
+                ...uniqueVolumeTypes.map(type => ({ name: type || 'Unknown', filterButton: true }))
+            ];
+
+            createTable({
+                worksheet: volumesSummarySheet,
+                name: 'volumes_type_summary',
+                ref: 'A1',
+                columns: volumeTypeTableColumns,
+                rows: volumeTypeSummaryData,
+                totalsRow: true,
+            });
+
+            console.log(`[main.ts] [excel] [volumes_summary] ✅ Volume type summary table created!`);
+
+            // Create volume STATUS summary table (starting after type table + some spacing)
+            const volumeStatusStartRow = uniqueVolumeProjects.length + 5; // Type table + header + totals + spacing
+            
+            const volumeStatusSummaryData: any[][] = [];
+            uniqueVolumeProjects.forEach((project) => {
+                const rowData: any[] = [project];
+                uniqueVolumeStatuses.forEach((volumeStatus) => {
+                    // Add formula to count volumes for each volume status
+                    rowData.push({
+                        formula: `COUNTIFS(volumes_table[project_name],"${project}",volumes_table[status],"${volumeStatus}")`
+                    });
+                });
+                volumeStatusSummaryData.push(rowData);
+            });
+
+            // Create volume STATUS summary table
+            const volumeStatusTableColumns = [
+                { name: 'Project Name', filterButton: true },
+                ...uniqueVolumeStatuses.map(status => ({ name: status || 'Unknown', filterButton: true }))
+            ];
+
+            createTable({
+                worksheet: volumesSummarySheet,
+                name: 'volumes_status_summary',
+                ref: `A${volumeStatusStartRow}`,
+                columns: volumeStatusTableColumns,
+                rows: volumeStatusSummaryData,
+                totalsRow: true,
+            });
+
+            console.log(`[main.ts] [excel] [volumes_summary] ✅ Volume status summary table created!`);
         }
         
-        // Write to file
-        const timestamp = new Date().toISOString().replace(/[-:Z]/g, '');
+        // Write to file with unique timestamp
+        const timestamp = new Date().toISOString().replace(/[-:Z]/g, '').replace(/\./g, '');
         const outputPath = path.join(outputDir, `${timestamp}-openstack-resources.xlsx`);
-        await workbook.xlsx.writeFile(outputPath);
-        console.log(`XLSX generated successfully at: ${outputPath}`);
+
+        console.log(`[main.ts] [excel] 💾 Writing Excel file to: ${outputPath}`);
+
+        // Determine final output path and write file
+        let finalOutputPath: string;
+
+        // Check if file already exists (shouldn't happen but let's be safe)
+        if (fs.existsSync(outputPath)) {
+            console.log(`[main.ts] [excel] ⚠️ File already exists, adding random suffix...`);
+            const randomSuffix = Math.random().toString(36).substring(7);
+            const baseDir = path.dirname(outputPath);
+            const baseName = path.basename(outputPath, '.xlsx');
+            finalOutputPath = path.join(baseDir, `${baseName}-${randomSuffix}.xlsx`);
+            await workbook.xlsx.writeFile(finalOutputPath);
+            console.log(`[main.ts] ✅ XLSX generated successfully at: ${finalOutputPath}`);
+        } else {
+            finalOutputPath = outputPath;
+            await workbook.xlsx.writeFile(finalOutputPath);
+            console.log(`[main.ts] ✅ XLSX generated successfully at: ${finalOutputPath}`);
+        }
+
+        // Open Excel file automatically (cross-platform)
+        console.log(`[main.ts] 🚀 Opening Excel file: ${finalOutputPath}`);
+
+        try {
+            let command: string;
+            if (process.platform === 'win32') {
+                command = `start excel "${finalOutputPath}"`;
+            } else if (process.platform === 'darwin') {
+                command = `open "${finalOutputPath}"`;
+            } else {
+                command = `xdg-open "${finalOutputPath}"`;
+            }
+
+            // Use promisified exec to wait for completion
+            const { exec: execPromise } = require('child_process');
+            const { promisify } = require('util');
+            const execAsync = promisify(execPromise);
+
+            await execAsync(command);
+            console.log(`[main.ts] ✅ Excel file opened successfully`);
+        } catch (error: any) {
+            console.error(`[main.ts] ❌ Failed to open Excel file: ${error.message}`);
+            console.log(`[main.ts] You can manually open the file at: ${finalOutputPath}`);
+        }
+
+        // Give a moment for the command to execute before exiting
+        setTimeout(() => {
+            console.log(`[main.ts] ✅ Process completed successfully`);
         process.exit(0);
+        }, 1000);
     } else {
-        console.log('No resources found');
+        console.log('[main.ts] ❌ No resources found');
         process.exit(1); 
     }
+
+}
+
+
+(async () => {
+    await main();
+    console.log('[main.ts] ✅ Process completed successfully');
+    process.exit(0);
 })();
