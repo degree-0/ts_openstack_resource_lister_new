@@ -349,7 +349,6 @@ const main = async () => {
                 ref: 'A1',
                 columns: statusTableColumns,
                 rows: statusSummaryData,
-                totalsRow: true,
             });
 
             console.log(`[main.ts] [excel] [servers_summary] ✅ Status summary table created!`);
@@ -378,7 +377,6 @@ const main = async () => {
                 ref: `A${computeStartRow}`,
                 columns: computeTableColumns,
                 rows: computeSummaryData,
-                totalsRow: true,
             });
 
             console.log(`[main.ts] [excel] [servers_summary] ✅ Compute summary table created!`);
@@ -471,7 +469,6 @@ const main = async () => {
                 ref: 'A1',
                 columns: volumeTypeTableColumns,
                 rows: volumeTypeSummaryData,
-                totalsRow: true,
             });
 
             console.log(`[main.ts] [excel] [volumes_summary] ✅ Volume type summary table created!`);
@@ -503,7 +500,6 @@ const main = async () => {
                 ref: `A${volumeStatusStartRow}`,
                 columns: volumeStatusTableColumns,
                 rows: volumeStatusSummaryData,
-                totalsRow: true,
             });
 
             console.log(`[main.ts] [excel] [volumes_summary] ✅ Volume status summary table created!`);
